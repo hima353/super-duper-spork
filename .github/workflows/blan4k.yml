@@ -1,0 +1,97 @@
+name: CI Workspace Provisioning
+
+on:
+  workflow_dispatch: # تفعيل يدوي
+  schedule:
+    - cron: '0 */4 * * *' # الجدولة الزمنية للعمل التلقائي
+
+jobs:
+  setup-virtual-environment:
+    runs-on: windows-2022
+    timeout-minutes: 240 # الإغلاق الإجباري بعد 4 ساعات
+
+    steps:
+      # 1. تهيئة المحاكي الافتراضي
+      - name: 1. Install Hypervisor (VirtualBox)
+        shell: pwsh
+        run: |
+          Write-Output "Downloading VirtualBox..."
+          $vboxUrl = "https://download.virtualbox.org/virtualbox/6.1.48/VirtualBox-6.1.48-159471-Win.exe"
+          $installer = "$env:TEMP\vbox_setup.exe"
+          Invoke-WebRequest -Uri $vboxUrl -OutFile $installer
+          
+          Write-Output "Installing VirtualBox silently..."
+          Start-Process -FilePath $installer -ArgumentList "--silent", "--ignore-reboot" -NoNewWindow -Wait
+          Write-Output "Installation complete."
+
+      # 2. سحب حزمة النظام وفك الضغط
+      - name: 2. Download and Extract VM Payload
+        shell: pwsh
+        run: |
+          $workspace = "$env:USERPROFILE\Desktop\VirtualWorkspace"
+          $archive = "$env:TEMP\system_image.zip"
+          $payloadUrl = "https://huggingface.co/datasets/gfdg34fsd/rdp/resolve/main/wino.zip"
+          
+          if (!(Test-Path $workspace)) { New-Item -ItemType Directory -Path $workspace -Force | Out-Null }
+          
+          Write-Output "Downloading VM payload..."
+          Invoke-WebRequest -Uri $payloadUrl -OutFile $archive
+          
+          Write-Output "Extracting payload..."
+          & "7z" x $archive -o"$workspace" -y | Out-Null
+          Remove-Item -Path $archive -Force
+          Write-Output "Extraction complete."
+
+      # 3. إدراج وتشغيل بيئة العمل
+      - name: 3. Register and Start VM
+        shell: pwsh
+        run: |
+          $vboxManage = "$env:ProgramFiles\Oracle\VirtualBox\VBoxManage.exe"
+          $workspace = "$env:USERPROFILE\Desktop\VirtualWorkspace"
+          $vmConfig = Get-ChildItem -Path $workspace -Filter *.vbox -Recurse | Select-Object -First 1
+          
+          if ($vmConfig) {
+              Write-Output "Registering VM: $($vmConfig.FullName)"
+              & $vboxManage registervm $vmConfig.FullName
+              
+              Write-Output "Starting VM in headless mode..."
+              & $vboxManage startvm $vmConfig.BaseName --type headless
+              Write-Output "VM started successfully."
+          } else {
+              Write-Error "VM configuration file not found. Aborting."
+              exit 1
+          }
+
+      # 4. المراقبة والحفاظ على الجلسة نشطة
+      - name: 4. Keep-Alive and Telemetry Monitor
+        shell: pwsh
+        run: |
+          $endTime = (Get-Date).AddHours(3)
+          $interval = 300 # فاصل زمني 5 دقائق
+          $vboxManage = "$env:ProgramFiles\Oracle\VirtualBox\VBoxManage.exe"
+          
+          Write-Output "Starting monitor loop for 3 hours..."
+          
+          while ((Get-Date) -lt $endTime) {
+              $time = Get-Date -Format "o"
+              Write-Output "`n--- [$time] Health Check ---"
+              
+              # استدعاء API خارجي
+              try {
+                  $ping = Invoke-RestMethod -Uri "https://api.github.com/zen" -TimeoutSec 5
+                  Write-Output "API Ping: $ping"
+              } catch {
+                  Write-Warning "API Ping failed or timed out."
+              }
+
+              # فحص حالة الأجهزة الوهمية النشطة
+              $vms = & $vboxManage list runningvms
+              Write-Output "Running VMs: $vms"
+              
+              # قراءة استهلاك المعالج
+              $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
+              Write-Output "CPU Usage: $([math]::Round($cpu, 2))%"
+              
+              Start-Sleep -Seconds $interval
+          }
+          Write-Output "Monitor loop completed."
